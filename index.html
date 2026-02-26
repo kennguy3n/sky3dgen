@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UAV Scene Reconstructor (2D ➜ 3D)</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0f1a;
+      --panel: #111827;
+      --accent: #3b82f6;
+      --accent-2: #10b981;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --danger: #ef4444;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(circle at top, #172554 0%, var(--bg) 40%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      border-right: 1px solid #1f2937;
+      padding: 1rem;
+      background: rgba(17, 24, 39, 0.95);
+      overflow-y: auto;
+    }
+
+    .viewer {
+      position: relative;
+      min-height: 100vh;
+    }
+
+    h1 {
+      font-size: 1.15rem;
+      margin: 0 0 .5rem;
+      letter-spacing: .02em;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: .9rem;
+      line-height: 1.4;
+      margin-bottom: 1rem;
+    }
+
+    .panel {
+      border: 1px solid #1f2937;
+      border-radius: 10px;
+      padding: .75rem;
+      margin-bottom: .75rem;
+      background: rgba(15, 23, 42, 0.55);
+    }
+
+    .panel h2 {
+      margin: 0 0 .5rem;
+      font-size: .95rem;
+    }
+
+    input[type="file"],
+    select,
+    button,
+    input[type="range"] {
+      width: 100%;
+      margin: .3rem 0;
+    }
+
+    button {
+      background: linear-gradient(135deg, var(--accent), #1d4ed8);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: .55rem .75rem;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button.secondary {
+      background: linear-gradient(135deg, #374151, #4b5563);
+    }
+
+    button.success {
+      background: linear-gradient(135deg, var(--accent-2), #059669);
+    }
+
+    button:disabled {
+      opacity: .55;
+      cursor: not-allowed;
+    }
+
+    label { font-size: .85rem; color: var(--muted); display: block; margin-top: .3rem; }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .4rem;
+      font-size: .82rem;
+    }
+
+    .metric {
+      padding: .45rem;
+      border-radius: 8px;
+      background: #0f172a;
+      border: 1px solid #1f2937;
+    }
+
+    .metric strong { display: block; color: var(--text); }
+
+    .status {
+      min-height: 2.2rem;
+      font-size: .86rem;
+      line-height: 1.35;
+      color: var(--muted);
+      white-space: pre-line;
+    }
+
+    .canvases {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: .5rem;
+    }
+
+    .canvases canvas,
+    .canvases img {
+      width: 100%;
+      border: 1px solid #1f2937;
+      border-radius: 8px;
+      background: #020617;
+      min-height: 96px;
+      object-fit: cover;
+    }
+
+    #three-container {
+      position: absolute;
+      inset: 0;
+    }
+
+    #overlay {
+      position: absolute;
+      left: .75rem;
+      top: .75rem;
+      background: rgba(2, 6, 23, 0.75);
+      border: 1px solid #1f2937;
+      border-radius: 8px;
+      padding: .45rem .6rem;
+      font-size: .8rem;
+      color: #cbd5e1;
+      pointer-events: none;
+    }
+
+    .warn {
+      color: #fbbf24;
+      font-size: .8rem;
+      margin-top: .4rem;
+    }
+
+    @media (max-width: 1100px) {
+      .app { grid-template-columns: 1fr; }
+      .viewer { min-height: 65vh; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <h1>UAV Scene Reconstructor</h1>
+    <div class="hint">
+      Upload one indoor/outdoor RGB image. The app runs on-device monocular depth + semantic segmentation to generate a metric-scaled 3D terrain/structure mesh for simulation prototyping.
+    </div>
+
+    <div class="panel">
+      <h2>1) Input</h2>
+      <input id="image-input" type="file" accept="image/*" />
+      <label for="depth-model">Depth model</label>
+      <select id="depth-model">
+        <option value="onnx-community/depth-anything-v2-small">Depth Anything V2 (small, faster)</option>
+        <option value="onnx-community/depth-anything-v2-base">Depth Anything V2 (base, higher quality)</option>
+      </select>
+      <label for="seg-model">Segmentation model</label>
+      <select id="seg-model">
+        <option value="onnx-community/segformer-b0-finetuned-ade-512-512">SegFormer ADE20K (balanced)</option>
+      </select>
+      <button id="run-btn">Run full reconstruction</button>
+      <div class="warn">First run downloads model weights (can be 100MB+ depending on model).</div>
+    </div>
+
+    <div class="panel">
+      <h2>2) Scene controls</h2>
+      <label for="depth-scale">Depth scale (meters)</label>
+      <input id="depth-scale" type="range" min="15" max="200" value="85" />
+      <label for="xy-scale">Horizontal scale (meters)</label>
+      <input id="xy-scale" type="range" min="20" max="400" value="120" />
+      <label for="mesh-decimate">Mesh decimation step</label>
+      <input id="mesh-decimate" type="range" min="1" max="8" value="2" />
+      <button class="secondary" id="refresh-btn">Rebuild mesh from latest maps</button>
+      <button class="success" id="export-btn" disabled>Export GLB (UAV simulator)</button>
+    </div>
+
+    <div class="panel">
+      <h2>3) Diagnostics</h2>
+      <div class="metrics" id="metrics"></div>
+      <div class="status" id="status">Idle.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Map previews</h2>
+      <div class="canvases">
+        <img id="rgb-preview" alt="RGB preview" />
+        <canvas id="depth-preview"></canvas>
+        <canvas id="seg-preview"></canvas>
+        <canvas id="class-preview"></canvas>
+      </div>
+    </div>
+  </aside>
+
+  <main class="viewer">
+    <div id="three-container"></div>
+    <div id="overlay">Orbit: drag • Zoom: wheel • Pan: right-drag</div>
+  </main>
+</div>
+
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+      "three/examples/jsm/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+    }
+  }
+</script>
+
+<script type="module">
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+  import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+  import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+  env.allowLocalModels = false;
+  env.useBrowserCache = true;
+
+  const classes = {
+    sky: new Set([2]),
+    ground: new Set([3, 6, 9, 11, 13, 46, 68]),
+    vegetation: new Set([4, 17]),
+    building: new Set([1, 5, 15, 25, 76]),
+    water: new Set([21, 26])
+  };
+
+  const ui = {
+    imageInput: document.getElementById('image-input'),
+    depthModel: document.getElementById('depth-model'),
+    segModel: document.getElementById('seg-model'),
+    runBtn: document.getElementById('run-btn'),
+    refreshBtn: document.getElementById('refresh-btn'),
+    exportBtn: document.getElementById('export-btn'),
+    depthScale: document.getElementById('depth-scale'),
+    xyScale: document.getElementById('xy-scale'),
+    meshDecimate: document.getElementById('mesh-decimate'),
+    status: document.getElementById('status'),
+    metrics: document.getElementById('metrics'),
+    rgbPreview: document.getElementById('rgb-preview'),
+    depthPreview: document.getElementById('depth-preview'),
+    segPreview: document.getElementById('seg-preview'),
+    classPreview: document.getElementById('class-preview')
+  };
+
+  let depthPipeline = null;
+  let segPipeline = null;
+  let sceneState = {
+    imageBitmap: null,
+    depthMap: null,
+    segMap: null,
+    classMap: null,
+    width: 0,
+    height: 0,
+    mesh: null
+  };
+
+  const three = createThreeScene(document.getElementById('three-container'));
+  animate();
+
+  function setStatus(msg) { ui.status.textContent = msg; }
+
+  function setMetrics(rows) {
+    ui.metrics.innerHTML = rows.map(([k, v]) => `<div class="metric"><strong>${k}</strong>${v}</div>`).join('');
+  }
+
+  async function ensurePipelines() {
+    if (!depthPipeline || depthPipeline.model_id !== ui.depthModel.value) {
+      setStatus(`Loading depth model: ${ui.depthModel.value}`);
+      depthPipeline = await pipeline('depth-estimation', ui.depthModel.value, { device: 'webgpu' }).catch(() => pipeline('depth-estimation', ui.depthModel.value));
+      depthPipeline.model_id = ui.depthModel.value;
+    }
+    if (!segPipeline || segPipeline.model_id !== ui.segModel.value) {
+      setStatus(`Loading segmentation model: ${ui.segModel.value}`);
+      segPipeline = await pipeline('image-segmentation', ui.segModel.value, { device: 'webgpu' }).catch(() => pipeline('image-segmentation', ui.segModel.value));
+      segPipeline.model_id = ui.segModel.value;
+    }
+  }
+
+  async function loadImageFromFile(file) {
+    const bitmap = await createImageBitmap(file);
+    const maxSize = 768;
+    const ratio = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(64, Math.round(bitmap.width * ratio));
+    const h = Math.max(64, Math.round(bitmap.height * ratio));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, w, h);
+
+    ui.rgbPreview.src = canvas.toDataURL('image/jpeg', 0.9);
+    const resized = await createImageBitmap(canvas);
+    return { bitmap: resized, width: w, height: h };
+  }
+
+  async function inferDepth(bitmap) {
+    const out = await depthPipeline(bitmap, { output_attentions: false });
+    const data = out.depth.data;
+    const [h, w] = out.depth.dims;
+    const arr = Float32Array.from(data);
+
+    let min = Infinity, max = -Infinity;
+    for (const v of arr) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    const norm = new Float32Array(arr.length);
+    const range = Math.max(1e-6, max - min);
+    for (let i = 0; i < arr.length; i++) norm[i] = (arr[i] - min) / range;
+
+    drawScalarMap(ui.depthPreview, norm, w, h, 'depth');
+    return { map: norm, width: w, height: h, min, max };
+  }
+
+  async function inferSegmentation(bitmap, w, h) {
+    const out = await segPipeline(bitmap, { subtask: 'semantic' });
+    const labels = out?.[0]?.mask?.data || out.mask?.data || out.data;
+    const dims = out?.[0]?.mask?.dims || out.mask?.dims || [h, w];
+    const segH = dims[0], segW = dims[1];
+    const seg = Uint16Array.from(labels);
+
+    const resized = resizeLabelMapNearest(seg, segW, segH, w, h);
+    drawSegMap(ui.segPreview, resized, w, h);
+    return resized;
+  }
+
+  function classifyMap(segMap, w, h) {
+    const out = new Uint8Array(w * h);
+    for (let i = 0; i < out.length; i++) {
+      const id = segMap[i];
+      out[i] = classes.sky.has(id) ? 1
+        : classes.ground.has(id) ? 2
+        : classes.vegetation.has(id) ? 3
+        : classes.building.has(id) ? 4
+        : classes.water.has(id) ? 5
+        : 0;
+    }
+    drawClassMap(ui.classPreview, out, w, h);
+    return out;
+  }
+
+  function buildMesh() {
+    if (!sceneState.depthMap || !sceneState.classMap) {
+      setStatus('No depth/class maps available.');
+      return;
+    }
+
+    const { width: w, height: h, depthMap, classMap } = sceneState;
+    const step = Number(ui.meshDecimate.value);
+    const cols = Math.floor(w / step);
+    const rows = Math.floor(h / step);
+    const vertexCount = cols * rows;
+
+    const depthScale = Number(ui.depthScale.value) / 10;
+    const xyScale = Number(ui.xyScale.value) / 100;
+
+    const positions = new Float32Array(vertexCount * 3);
+    const colors = new Float32Array(vertexCount * 3);
+    const uvs = new Float32Array(vertexCount * 2);
+
+    const sample = (x, y) => {
+      const clampedX = Math.min(w - 1, Math.max(0, x));
+      const clampedY = Math.min(h - 1, Math.max(0, y));
+      return clampedY * w + clampedX;
+    };
+
+    let ptr = 0;
+    let cptr = 0;
+    let uptr = 0;
+
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const px = x * step;
+        const py = y * step;
+        const idx = sample(px, py);
+        let d = depthMap[idx];
+        const cls = classMap[idx];
+
+        if (cls === 1) d = Math.max(0.01, d * 0.07);
+        if (cls === 2) d = d * 1.2;
+        if (cls === 4) d = d * 1.4;
+
+        const worldX = (x / (cols - 1) - 0.5) * xyScale * 2;
+        const worldY = (0.5 - y / (rows - 1)) * xyScale * (h / w) * 2;
+        const worldZ = (1 - d) * depthScale;
+
+        positions[ptr++] = worldX;
+        positions[ptr++] = worldY;
+        positions[ptr++] = worldZ;
+
+        const [r, g, b] = classColor(cls);
+        colors[cptr++] = r;
+        colors[cptr++] = g;
+        colors[cptr++] = b;
+
+        uvs[uptr++] = x / (cols - 1);
+        uvs[uptr++] = 1 - y / (rows - 1);
+      }
+    }
+
+    const indices = [];
+    for (let y = 0; y < rows - 1; y++) {
+      for (let x = 0; x < cols - 1; x++) {
+        const i = y * cols + x;
+        indices.push(i, i + cols, i + 1);
+        indices.push(i + 1, i + cols, i + cols + 1);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+
+    const texture = new THREE.TextureLoader().load(ui.rgbPreview.src);
+    texture.colorSpace = THREE.SRGBColorSpace;
+
+    const material = new THREE.MeshStandardMaterial({
+      map: texture,
+      vertexColors: true,
+      roughness: 0.92,
+      metalness: 0.02,
+      side: THREE.DoubleSide
+    });
+
+    if (sceneState.mesh) {
+      three.scene.remove(sceneState.mesh);
+      sceneState.mesh.geometry.dispose();
+      sceneState.mesh.material.dispose();
+    }
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.rotation.x = -Math.PI / 2.2;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    sceneState.mesh = mesh;
+    three.scene.add(mesh);
+
+    const box = new THREE.Box3().setFromObject(mesh);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    three.controls.target.copy(center);
+    three.camera.position.set(center.x + 8, center.y + 7, center.z + 9);
+    three.controls.update();
+
+    const area = ((xyScale * 2) * (xyScale * 2 * h / w)).toFixed(1);
+    setMetrics([
+      ['Resolution', `${w} × ${h}`],
+      ['Vertices', vertexCount.toLocaleString()],
+      ['Triangles', (indices.length / 3).toLocaleString()],
+      ['Scene footprint', `${area} m²`],
+      ['Depth scale', `${depthScale.toFixed(1)} m`],
+      ['Decimation', `1 / ${step}`]
+    ]);
+
+    ui.exportBtn.disabled = false;
+    setStatus('3D mesh rebuilt and ready for export.');
+  }
+
+  function exportGlb() {
+    if (!sceneState.mesh) return;
+    const exporter = new GLTFExporter();
+    exporter.parse(three.scene, (gltf) => {
+      const blob = new Blob([gltf], { type: 'model/gltf-binary' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'uav_scene_reconstruction.glb';
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus('Exported GLB file for simulator ingestion.');
+    }, { binary: true, onlyVisible: true });
+  }
+
+  ui.runBtn.addEventListener('click', async () => {
+    const file = ui.imageInput.files?.[0];
+    if (!file) {
+      setStatus('Pick an image file first.');
+      return;
+    }
+
+    ui.runBtn.disabled = true;
+    ui.exportBtn.disabled = true;
+    try {
+      setStatus('Preparing image…');
+      await ensurePipelines();
+
+      const { bitmap, width, height } = await loadImageFromFile(file);
+      sceneState.imageBitmap = bitmap;
+      sceneState.width = width;
+      sceneState.height = height;
+
+      setStatus('Running monocular depth inference…');
+      const depth = await inferDepth(bitmap);
+      const depthResized = resizeFloatMapBilinear(depth.map, depth.width, depth.height, width, height);
+      sceneState.depthMap = depthResized;
+
+      setStatus('Running semantic segmentation…');
+      sceneState.segMap = await inferSegmentation(bitmap, width, height);
+
+      setStatus('Classifying sky/ground/objects…');
+      sceneState.classMap = classifyMap(sceneState.segMap, width, height);
+
+      setStatus('Building simulation mesh…');
+      buildMesh();
+    } catch (err) {
+      console.error(err);
+      setStatus(`Reconstruction failed: ${err.message || err}`);
+    } finally {
+      ui.runBtn.disabled = false;
+    }
+  });
+
+  ui.refreshBtn.addEventListener('click', buildMesh);
+  ui.exportBtn.addEventListener('click', exportGlb);
+
+  [ui.depthScale, ui.xyScale, ui.meshDecimate].forEach(el => {
+    el.addEventListener('change', () => sceneState.depthMap && buildMesh());
+  });
+
+  function createThreeScene(container) {
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    container.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x050b17);
+    scene.fog = new THREE.FogExp2(0x050b17, 0.04);
+
+    const camera = new THREE.PerspectiveCamera(58, container.clientWidth / container.clientHeight, 0.1, 1000);
+    camera.position.set(10, 9, 10);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.07;
+
+    const hemi = new THREE.HemisphereLight(0x9ec5ff, 0x202020, 0.9);
+    scene.add(hemi);
+
+    const dir = new THREE.DirectionalLight(0xffffff, 0.95);
+    dir.position.set(8, 14, 6);
+    dir.castShadow = true;
+    scene.add(dir);
+
+    const grid = new THREE.GridHelper(50, 50, 0x2563eb, 0x1e3a8a);
+    grid.position.y = -0.05;
+    scene.add(grid);
+
+    const axes = new THREE.AxesHelper(2.5);
+    scene.add(axes);
+
+    window.addEventListener('resize', () => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+
+    return { renderer, scene, camera, controls };
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    three.controls.update();
+    three.renderer.render(three.scene, three.camera);
+  }
+
+  function classColor(c) {
+    switch (c) {
+      case 1: return [0.37, 0.64, 0.99];
+      case 2: return [0.34, 0.78, 0.36];
+      case 3: return [0.20, 0.62, 0.22];
+      case 4: return [0.72, 0.72, 0.74];
+      case 5: return [0.22, 0.42, 0.93];
+      default: return [0.54, 0.54, 0.57];
+    }
+  }
+
+  function resizeLabelMapNearest(src, srcW, srcH, dstW, dstH) {
+    const out = new Uint16Array(dstW * dstH);
+    for (let y = 0; y < dstH; y++) {
+      const sy = Math.min(srcH - 1, Math.floor(y * srcH / dstH));
+      for (let x = 0; x < dstW; x++) {
+        const sx = Math.min(srcW - 1, Math.floor(x * srcW / dstW));
+        out[y * dstW + x] = src[sy * srcW + sx] || 0;
+      }
+    }
+    return out;
+  }
+
+  function resizeFloatMapBilinear(src, srcW, srcH, dstW, dstH) {
+    const out = new Float32Array(dstW * dstH);
+    for (let y = 0; y < dstH; y++) {
+      const gy = (y / (dstH - 1)) * (srcH - 1);
+      const y0 = Math.floor(gy);
+      const y1 = Math.min(srcH - 1, y0 + 1);
+      const wy = gy - y0;
+      for (let x = 0; x < dstW; x++) {
+        const gx = (x / (dstW - 1)) * (srcW - 1);
+        const x0 = Math.floor(gx);
+        const x1 = Math.min(srcW - 1, x0 + 1);
+        const wx = gx - x0;
+
+        const p00 = src[y0 * srcW + x0];
+        const p10 = src[y0 * srcW + x1];
+        const p01 = src[y1 * srcW + x0];
+        const p11 = src[y1 * srcW + x1];
+
+        const v0 = p00 * (1 - wx) + p10 * wx;
+        const v1 = p01 * (1 - wx) + p11 * wx;
+        out[y * dstW + x] = v0 * (1 - wy) + v1 * wy;
+      }
+    }
+    return out;
+  }
+
+  function drawScalarMap(canvas, data, w, h, mode = 'depth') {
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    for (let i = 0; i < data.length; i++) {
+      const v = Math.max(0, Math.min(1, data[i]));
+      let r, g, b;
+      if (mode === 'depth') {
+        r = 255 * v;
+        g = 255 * (1 - Math.abs(v - 0.5) * 2);
+        b = 255 * (1 - v);
+      } else {
+        r = g = b = 255 * v;
+      }
+      const j = i * 4;
+      img.data[j] = r;
+      img.data[j + 1] = g;
+      img.data[j + 2] = b;
+      img.data[j + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function drawSegMap(canvas, data, w, h) {
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    for (let i = 0; i < data.length; i++) {
+      const id = data[i];
+      const r = (id * 53) % 255;
+      const g = (id * 97) % 255;
+      const b = (id * 193) % 255;
+      const j = i * 4;
+      img.data[j] = r;
+      img.data[j + 1] = g;
+      img.data[j + 2] = b;
+      img.data[j + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function drawClassMap(canvas, data, w, h) {
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    for (let i = 0; i < data.length; i++) {
+      const [r, g, b] = classColor(data[i]).map(v => Math.round(v * 255));
+      const j = i * 4;
+      img.data[j] = r;
+      img.data[j + 1] = g;
+      img.data[j + 2] = b;
+      img.data[j + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+</script>
+</body>
+</html>
